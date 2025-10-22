@@ -1,0 +1,139 @@
+# Dockerfile for serving GLM 4.5 on AMD MI300X
+# Based on the manual steps from glm_guide.md
+
+FROM rocm/vllm-dev:nightly
+
+# Set environment variables
+ENV SHELL=/bin/bash
+ENV PYTORCH_ROCM_ARCH="gfx942"
+ENV RAY_EXPERIMENTAL_NOSET_ROCR_VISIBLE_DEVICES=1
+ENV RAY_EXPERIMENTAL_NOSET_HIP_VISIBLE_DEVICES=1
+ENV TOKENIZERS_PARALLELISM=false
+ENV SAFETENSORS_FAST_GPU=1
+ENV HIP_FORCE_DEV_KERNARG=1
+
+# Set working directory
+WORKDIR /app
+
+# Install basic utilities
+RUN apt-get update -q -y && apt-get install -q -y \
+    git \
+    wget \
+    curl \
+    vim \
+    sqlite3 \
+    libsqlite3-dev \
+    libfmt-dev \
+    libmsgpack-dev \
+    libsuitesparse-dev \
+    apt-transport-https \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Upgrade pip
+RUN python3 -m pip install --upgrade pip
+
+# Uninstall existing vllm if present
+RUN pip uninstall -y vllm || true
+
+# Copy the current vllm repository
+COPY . /app/vllm
+
+# Copy rocm-requirements.txt to the expected location
+RUN mkdir -p /app/GLM-4.5/example/AMD_GPU/ && \
+    cp /app/vllm/rocm-requirements.txt /app/GLM-4.5/example/AMD_GPU/rocm-requirements.txt
+
+# Install rocm-requirements.txt dependencies
+WORKDIR /app/GLM-4.5/example/AMD_GPU/
+RUN pip install -r rocm-requirements.txt
+
+# Build and install vLLM from source
+WORKDIR /app/vllm
+RUN python3 setup.py develop
+
+# Set the default working directory
+WORKDIR /app
+
+# Create a startup script for easy serving
+RUN echo '#!/bin/bash\n\
+echo "Starting GLM 4.5 vLLM server on AMD MI300X..."\n\
+echo "Model: ${MODEL_NAME:-zai-org/GLM-4.5}"\n\
+echo "Tensor Parallel Size: ${TENSOR_PARALLEL_SIZE:-8}"\n\
+echo "GPU Memory Utilization: ${GPU_MEMORY_UTIL:-0.95}"\n\
+echo ""\n\
+VLLM_USE_V1=1 vllm serve ${MODEL_NAME:-zai-org/GLM-4.5} \\\n\
+    --tensor-parallel-size ${TENSOR_PARALLEL_SIZE:-8} \\\n\
+    --gpu-memory-utilization ${GPU_MEMORY_UTIL:-0.95} \\\n\
+    --disable-log-requests \\\n\
+    --no-enable-prefix-caching \\\n\
+    --trust-remote-code \\\n\
+    ${EXTRA_ARGS}\n\
+' > /app/start_glm_server.sh && chmod +x /app/start_glm_server.sh
+
+# Create a README for usage instructions
+RUN echo 'GLM 4.5 on AMD MI300X Docker Image\n\
+=====================================\n\
+\n\
+This image is built to serve GLM 4.5 models on AMD MI300X GPUs.\n\
+\n\
+Usage:\n\
+------\n\
+\n\
+1. Run the container:\n\
+   docker run -it --rm \\\n\
+     --cap-add=SYS_PTRACE \\\n\
+     -e SHELL=/bin/bash \\\n\
+     --network=host \\\n\
+     --security-opt seccomp=unconfined \\\n\
+     --device=/dev/kfd \\\n\
+     --device=/dev/dri \\\n\
+     --group-add video \\\n\
+     --ipc=host \\\n\
+     --name vllm_glm45 \\\n\
+     <image_name>\n\
+\n\
+2. Start the GLM 4.5 server:\n\
+   /app/start_glm_server.sh\n\
+\n\
+   Or with custom parameters:\n\
+   MODEL_NAME=zai-org/GLM-4.5 \\\n\
+   TENSOR_PARALLEL_SIZE=8 \\\n\
+   GPU_MEMORY_UTIL=0.95 \\\n\
+   /app/start_glm_server.sh\n\
+\n\
+   Or manually:\n\
+   VLLM_USE_V1=1 vllm serve zai-org/GLM-4.5 \\\n\
+     --tensor-parallel-size 8 \\\n\
+     --gpu-memory-utilization 0.95 \\\n\
+     --disable-log-requests \\\n\
+     --no-enable-prefix-caching \\\n\
+     --trust-remote-code\n\
+\n\
+Environment Variables:\n\
+---------------------\n\
+- MODEL_NAME: Model to serve (default: zai-org/GLM-4.5)\n\
+- TENSOR_PARALLEL_SIZE: Number of GPUs for tensor parallelism (default: 8)\n\
+- GPU_MEMORY_UTIL: GPU memory utilization (default: 0.95)\n\
+- EXTRA_ARGS: Additional arguments to pass to vllm serve\n\
+\n\
+Notes:\n\
+------\n\
+- HuggingFace credentials should be mounted or set via HF_TOKEN environment variable\n\
+- The system assumes 8 MI300X GPUs are available\n\
+- Adjust TENSOR_PARALLEL_SIZE based on your hardware configuration\n\
+' > /app/README.txt
+
+# Display build information
+RUN echo "==================================================" && \
+    echo "GLM 4.5 AMD MI300X Docker Image Build Complete" && \
+    echo "==================================================" && \
+    echo "vLLM version: $(python3 -c 'import vllm; print(vllm.__version__)' 2>/dev/null || echo 'installed')" && \
+    echo "PyTorch version: $(python3 -c 'import torch; print(torch.__version__)')" && \
+    echo "ROCm architecture: $PYTORCH_ROCM_ARCH" && \
+    echo "==================================================" && \
+    cat /app/README.txt && \
+    echo "=================================================="
+
+# Default command
+CMD ["/bin/bash"]
+
